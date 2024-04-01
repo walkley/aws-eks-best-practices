@@ -1,6 +1,6 @@
 site_name: EKS Best Practices Guides
 repo_name: "aws/aws-eks-best-practices"
-repo_url: "https://github.com/aws/aws-eks-best-practices"
+repo_url: "https://github.com/walkley/aws-eks-best-practices"
 docs_dir: "content"
 theme:
   name: material
@@ -180,6 +180,11 @@ plugins:
             Workloads: 워크로드
             gMSA for Windows Containers: gMSA 윈도우 컨테이너
           site_name: EKS 모범 사례 가이드
+        - locale: en
+          name: English
+          fixed_link: ./cn/
+          build: true
+          site_name: EKS 最佳实践指南
       reconfigure_material: true
       reconfigure_search: true
 extra:
