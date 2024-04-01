@@ -180,8 +180,8 @@ plugins:
             Workloads: 워크로드
             gMSA for Windows Containers: gMSA 윈도우 컨테이너
           site_name: EKS 모범 사례 가이드
-        - locale: en
-          name: English
+        - locale: cn
+          name: 简体中文
           fixed_link: ./cn/
           build: true
           site_name: EKS 最佳实践指南
