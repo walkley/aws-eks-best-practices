@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import glob
 import json
 import logging
@@ -25,9 +26,6 @@ bedrock = boto3.client(
 
 modelId_Claude3_Sonnet = 'anthropic.claude-3-sonnet-20240229-v1:0'
 modelId_Claude3_Haiku = "anthropic.claude-3-haiku-20240307-v1:0"
-chinese_comma_pattern = r'([\u4e00-\u9fa5]+[\w )]*),'
-chinese_colon_pattern = r'([\u4e00-\u9fa5]+[\w )]*):'
-chunk_max_length = 2048
 
 system_prompt = '''
 你是一位AWS资深解决方案架构师，同时精通英文和中文，也非常熟悉Markdown文件的格式。你正在协助用户将Markdown格式的英文技术文档翻译成简体中文，请在协助翻译时严格遵守以下规则：
@@ -48,7 +46,25 @@ user_prompt = '''
 完成翻译后，请将翻译后的内容放在 <translated_markdown></translated_markdown> 中，不要输出其它与翻译无关的内容。
 '''
 
-def complete_translation(system_prompt: str, user_content: str, translated_content: str, modelId=modelId_Claude3_Haiku):
+# 文件名匹配，只翻译原始英文MD文件，已经翻译的，如file1.zh.md，file2.ko.md等不翻译
+excluded_file_pattern = re.compile(r'.*\.[a-z]{2}\.md')
+
+# 替换中文翻译中错误的半角标点符号，仅考虑句子中包含中文字符的情况，特殊情况如 http:// 中间的冒号不做替换
+punctuation_mapping = {
+    ',': '，',
+    '?': '？',
+    ':': '：'
+}
+
+punctuation_re_pattern = r'([\u4e00-\u9fa5]+[\w ()]*)([%s](?!//))' % ''.join(punctuation_mapping.keys())
+
+def replace_punctuation(text):
+    '''
+    replace half-width punctuation marks with full-width punctuation marks, such as: ", ? :' etc.
+    '''
+    return re.sub(punctuation_re_pattern, lambda x: x.group(1) + punctuation_mapping[x.group(2)], text)
+
+def complete_translation(system_prompt: str, user_content: str, translated_content: str, modelId=modelId_Claude3_Sonnet):
     '''
     Complete translation by sending the already translated part to prefill the assistant, assistant should continue to translate the remaining content.
     '''
@@ -59,7 +75,7 @@ def complete_translation(system_prompt: str, user_content: str, translated_conte
     },
     {
         "role": "assistant",
-        "content": translated_content.rstrip() #final assistant content cannot end with trailing whitespace
+        "content": translated_content.rstrip() # final assistant content cannot end with trailing whitespace
     }]
 
     body = json.dumps({
@@ -75,59 +91,65 @@ def complete_translation(system_prompt: str, user_content: str, translated_conte
     return response_body
     
 def translate_file(markdown_file):
+    start_time = time.time()
     # check file size > 100k
     if os.path.getsize(markdown_file) > 100000:
         logger.error(f"{markdown_file} is larger than 100k which cannot be handled")
         return
 
-    start_time = time.time()
-    logger.info(f"translating {markdown_file} ...")
     with open(markdown_file, 'r', encoding='utf-8') as f:
         markdown_content = f.read()
 
     uer_content = user_prompt.replace("{{markdown_content}}", markdown_content)
     translated_content = "<translated_markdown>"
-    total_input_tokens = 0
-    total_output_tokens = 0
+    input_tokens = 0
+    output_tokens = 0
     while True:
         response_body = complete_translation(system_prompt, uer_content, translated_content)
         for line in response_body['content']:
             translated_content += line['text']
         
-        input_tokens = response_body.get('usage').get('input_tokens')
-        output_tokens = response_body.get('usage').get('output_tokens')
-        total_input_tokens += input_tokens
-        total_output_tokens += output_tokens
-        logger.info(f"    completed one trunk, input_tokens: {input_tokens}, output_tokens: {output_tokens}")
+        input_tokens += response_body.get('usage').get('input_tokens')
+        output_tokens += response_body.get('usage').get('output_tokens')
+
         # break the loop(stop translation) if stop_reason is "end_turn" or translated_content contains "</translated_markdown>"
         if response_body.get('stop_reason') == "end_turn" or "</translated_markdown>" in translated_content:
             break
-    
+
     translated_content = translated_content.strip()
     if translated_content.startswith("<translated_markdown>") and translated_content.endswith("</translated_markdown>"):
         translated_content = translated_content[len("<translated_markdown>"):-len("</translated_markdown>")].strip()
-        # replace half-width punctuation marks with full-width punctuation marks, such as: ", ' etc.
-        translated_content = re.sub(chinese_comma_pattern, r'\1，', translated_content)
-        translated_content = re.sub(chinese_colon_pattern, r'\1：', translated_content)
+        translated_content = replace_punctuation(translated_content)
         translated_file = os.path.splitext(markdown_file)[0] + '.zh.md'
         with open(translated_file, 'w', encoding='utf-8') as f:
             f.write(translated_content)
-        logger.info(f"done! [{int(time.time() - start_time)}s], consumed tokens: input = {total_input_tokens}, output = {total_output_tokens}")
+
+        logger.info(f"Translated {markdown_file} in {int(time.time() - start_time)}s, consumed {input_tokens} input tokens and {output_tokens} output tokens")
     else:
         logger.error(f"Error: {markdown_file} translation failed")
 
-def translate(path):
+    return input_tokens, output_tokens
+
+def translate(path: str, parallel: bool = False):
     if os.path.isfile(path):
         translate_file(path)
     elif os.path.isdir(path):
-        for file_path in glob.glob(f"{path}/**/*.md", recursive=True):
-            if not file_path.endswith(('.ko.md', '.zh.md')):
+        files = [f for f in glob.glob(f"{path}/**/*.md", recursive=True) if not excluded_file_pattern.match(f)]
+        if parallel:
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                executor.map(translate_file, files)
+        else:
+            for file_path in files:
                 translate_file(file_path)
     else:
         logger.error(f"Invalid path: {path}")
 
+# usage: python translate_cn.py ./path [true|false](parallel or sequential by default)
 if __name__ == '__main__':
     path = os.getcwd()
+    parallel = False
     if len(sys.argv) > 1:
         path = sys.argv[1]
-    translate(path)
+    if len(sys.argv) > 2:
+        parallel = sys.argv[2].lower() == "true"
+    translate(path, parallel)
